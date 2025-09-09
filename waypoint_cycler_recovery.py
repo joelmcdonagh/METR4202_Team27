@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+#hi 
+
 import math
 from typing import Optional, Deque, List, Tuple
 from collections import deque
@@ -116,7 +118,7 @@ class WaypointRecoveryCommander(Node):
         else:
             self._send_current_waypoint()
 
-    # ---------- helpers ----------
+    # helpers
     def _start_explore_after_delay(self):
         self._start_explore_once.cancel()
         self.create_timer(self.params.explore_tick_sec, self._explore_tick)
@@ -149,7 +151,7 @@ class WaypointRecoveryCommander(Node):
             self._retry_timer.cancel()
             self._retry_timer = None
 
-    # ---------- send goals ----------
+    # send goals 
     def _same_goal(self, a: PoseStamped, b: PoseStamped, tol: float = 1e-3) -> bool:
         return (abs(a.pose.position.x - b.pose.position.x) < tol and
                 abs(a.pose.position.y - b.pose.position.y) < tol)
@@ -178,7 +180,7 @@ class WaypointRecoveryCommander(Node):
         self.current_idx = (self.current_idx + 1) % len(self.waypoints)
         self._send_current_waypoint()
 
-    # ---------- Nav2 callbacks ----------
+    # Nav2 callbacks 
     def _on_nav_goal_sent(self, future):
         gh = future.result()
         if not gh.accepted:
@@ -207,7 +209,7 @@ class WaypointRecoveryCommander(Node):
             self.get_logger().warn(f'NavigateToPose ended with status={status} → recovery')
             self._trigger_recovery(f'nav_status_{status}')
 
-    # ---------- BT + odom ----------
+    # BT and Odom
     def bt_log_callback(self, msg: BehaviorTreeLog):
         for e in msg.event_log:
             if e.node_name.endswith('NavigateRecovery') and e.current_status in ['IDLE', 'FAILURE', 'FAILED']:
@@ -234,7 +236,7 @@ class WaypointRecoveryCommander(Node):
             self.get_logger().warn(f'No progress in {self.params.stuck_window_sec:.1f}s → recovery')
             self._trigger_recovery('stuck_no_progress')
 
-    # ---------- recovery ----------
+    # recovery
     def _trigger_recovery(self, reason: str):
         if self.recovering: return
         if self.recovery_attempts >= self.params.max_recovery_attempts_per_goal:
@@ -246,7 +248,7 @@ class WaypointRecoveryCommander(Node):
                 gx, gy = self.current_goal.pose.position.x, self.current_goal.pose.position.y
                 self.blacklist.append((gx, gy))
                 self.get_logger().warn(f'Blacklisting unreachable goal ({gx:.2f}, {gy:.2f}).')
-                self.current_goal = None  # <--- important: drop it so we don't reuse
+                self.current_goal = None  # important: drop it so we don't reuse
                 self._explore_tick()
             else:
                 self._advance_waypoint()
@@ -324,7 +326,7 @@ class WaypointRecoveryCommander(Node):
 
         self._retry_timer = self.create_timer(self.params.retry_delay_sec, _retry_once)
 
-    # ---------- exploration ----------
+    # exploration
     def map_cb(self, msg: OccupancyGrid):
         self.latest_map = msg
 
@@ -477,7 +479,7 @@ class WaypointRecoveryCommander(Node):
             gh.get_result_async().add_done_callback(_after_done)
         self.spin_client.send_goal_async(goal).add_done_callback(_after_sent)
 
-    # ---------- planner pre-check ----------
+    # planner pre-check
     def _validate_goal_async(self, goal_pose: PoseStamped):
         if self.planning: return
         self.planning = True; self.pending_candidate = goal_pose
@@ -544,4 +546,3 @@ class WaypointRecoveryCommander(Node):
             px, py = self.pending_candidate.pose.position.x, self.pending_candidate.pose.position.y
             self.blacklist.append((px, py))
         self.pending_candidate = None
-        self._explore_tick()
