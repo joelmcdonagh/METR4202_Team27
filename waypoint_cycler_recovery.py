@@ -19,7 +19,7 @@ from std_srvs.srv import Empty  # for costmap clearing
 
 @dataclass
 class Params:
-    mode: str = "loop"                  # "loop" or "explore"
+    mode: str = "explore"                  # "loop" or "explore"
     # Stuck detection
     stuck_window_sec: float = 3.0
     min_progress_m: float = 0.05
@@ -545,15 +545,3 @@ class WaypointRecoveryCommander(Node):
             self.blacklist.append((px, py))
         self.pending_candidate = None
         self._explore_tick()
-
-
-def main(args=None):
-    rclpy.init(args=args)
-    node = WaypointRecoveryCommander()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
-
-
-if __name__ == '__main__':
-    main()
