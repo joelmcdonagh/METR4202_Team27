@@ -1,6 +1,0 @@
-Specification-Title: OpenCV
-Specification-Version: 4.13.0-dev
-Implementation-Title: OpenCV
-Implementation-Version: unknown
-Implementation-Date: 
-Automatic-Module-Name: org.opencv
