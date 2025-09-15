@@ -1,0 +1,4 @@
+1. Get occupancy grid from SLAM
+2. Filter out all cells without unknown neighbours (frontier cells only)
+3. Evaluate cost of each frontier based on distance to bot and amount of frontier cells in 3 cell radius
+4. 
