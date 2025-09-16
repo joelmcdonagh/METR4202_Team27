@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-#hi 
 
 import math
 from typing import Optional, Deque, List, Tuple
@@ -211,11 +209,25 @@ class WaypointRecoveryCommander(Node):
 
     # BT and Odom
     def bt_log_callback(self, msg: BehaviorTreeLog):
+        if not self.goal_active or self.recovering:
+            return 
+        
         for e in msg.event_log:
-            if e.node_name.endswith('NavigateRecovery') and e.current_status in ['IDLE', 'FAILURE', 'FAILED']:
-                if self.goal_active:
-                    self.get_logger().info('BT says NavigateRecovery is IDLE/FAILED → ensure recovery')
-                    self._trigger_recovery('bt_idle_or_failed')
+            if not e.node_name.endswith('NavigateRecovery'):
+                continue
+
+            prev = getattr(e, 'previous_status', '')
+            curr = getattr(e, 'current_status', '')
+
+            try:
+                et = e.timestamp.sec + e.timestamp.nanosec / 1e9
+            except Exception:
+                et = now
+
+            if (curr == 'FAILURE' and prev == 'RUNNING' and (now - et) < 0.5):
+                self.get_logger().info('BT NavigateRecovery transition RUNNING→FAILURE → trigger recovery')
+                self._trigger_recovery('bt_navrecov_failed')
+                return 
 
     def odom_callback(self, msg: Odometry):
         now = self._now_sec()
