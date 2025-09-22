@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 import math
 from typing import Optional, Deque, List, Tuple
@@ -14,7 +16,7 @@ from nav_msgs.msg import Odometry, OccupancyGrid
 from nav2_msgs.msg import BehaviorTreeLog
 from nav2_msgs.action import NavigateToPose, Spin, BackUp, ComputePathToPose
 from builtin_interfaces.msg import Duration as RosDuration
-from std_srvs.srv import Empty  # for costmap clearing
+from std_srvs.srv import Empty  # costmap clearing
 
 
 @dataclass
@@ -26,19 +28,19 @@ class Params:
     # Recovery
     backup_distance_m: float = 0.15
     backup_speed_mps: float = 0.05
-    spin_angle_rad: float = 2.0 * math.pi
-    action_time_allowance_sec: int = 10
+    spin_angle_rad: float = math.pi        # recovery spin (π). Sweep spin stays 2π elsewhere
+    action_time_allowance_sec: int = 30    # more forgiving than 10s
     max_recovery_attempts_per_goal: int = 2
     # Goal timeout
     nav_timeout_sec: float = 45.0
     # Exploration cadence/quality
     explore_tick_sec: float = 1.0
     initial_explore_delay_sec: float = 2.0
-    blacklist_radius_m: float = 0.25
-    min_frontier_separation_m: float = 0.35
+    blacklist_radius_m: float = 0.35
+    min_frontier_separation_m: float = 0.45
     min_plan_length_m: float = 0.30
     # Frontier goal “sanitization”
-    safe_snap_radius_cells: int = 1
+    safe_snap_radius_cells: int = 2
     # Endpoint backoff along global path
     backoff_poses_base: int = 5
     backoff_poses_step: int = 4
@@ -59,34 +61,39 @@ class WaypointRecoveryCommander(Node):
     def __init__(self):
         super().__init__('waypoint_recovery_commander')
 
+        # ---------- Parameters ----------
         self.declare_parameter('mode', 'loop')
         self.params = Params(mode=self.get_parameter('mode').get_parameter_value().string_value)
 
+        # ---------- QoS ----------
         qos_bt = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                             history=HistoryPolicy.KEEP_LAST, depth=10)
         qos_odom = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                               history=HistoryPolicy.KEEP_LAST, depth=10)
 
+        # ---------- Subscriptions ----------
         self.create_subscription(BehaviorTreeLog, 'behavior_tree_log', self.bt_log_callback, qos_bt)
         self.create_subscription(Odometry, 'odom', self.odom_callback, qos_odom)
         self.create_subscription(OccupancyGrid, 'map', self.map_cb, 10)
         self.latest_map: Optional[OccupancyGrid] = None
 
+        # ---------- Actions ----------
         self.nav_client    = ActionClient(self, NavigateToPose,    'navigate_to_pose')
         self.plan_client   = ActionClient(self, ComputePathToPose, 'compute_path_to_pose')
         self.spin_client   = ActionClient(self, Spin,              'spin')
         self.backup_client = ActionClient(self, BackUp,            'backup')
 
+        # ---------- Services ----------
         self.clear_local  = self.create_client(Empty, '/local_costmap/clear_entirely_local_costmap')
         self.clear_global = self.create_client(Empty, '/global_costmap/clear_entirely_global_costmap')
 
-        # loop-mode demo waypoints
+        # ---------- Waypoints (loop mode demo) ----------
         self.waypoints: List[PoseStamped] = []
         p0 = PoseStamped(); p0.header.frame_id='map'; p0.pose.position.x= 1.7; p0.pose.position.y= 0.5; p0.pose.orientation.w=1.0
         p1 = PoseStamped(); p1.header.frame_id='map'; p1.pose.position.x=-0.6; p1.pose.position.y= 1.8; p1.pose.orientation.w=1.0
         self.waypoints += [p0, p1]
 
-        # state
+        # ---------- State ----------
         self.current_idx = 0
         self.current_goal: Optional[PoseStamped] = None
         self.goal_active = False
@@ -95,15 +102,31 @@ class WaypointRecoveryCommander(Node):
         self._odom_buf: Deque[tuple[float, float, float]] = deque(maxlen=40)
 
         self._goal_timeout_timer = None
-        self._retry_timer = None          # <-- one-shot retry timer handle
+        self._retry_timer = None
         self._last_spin_end_time = 0.0
 
         self.blacklist: List[Tuple[float, float]] = []
         self.planning = False
         self.pending_candidate: Optional[PoseStamped] = None
 
+        # Anti-ping-pong (loop mode)
+        self._wp_last_visit_sec: List[float] = [0.0 for _ in self.waypoints]
+        self.min_revisit_interval_sec: float = 20.0  # skip recently visited wp (>=3 wps)
+        self.dwell_on_arrival_sec: float = 2.0       # small pause before moving on
+
+        # Anti-ping-pong (explore mode)
+        self.recent_reached: Deque[Tuple[float, float, float]] = deque(maxlen=8)  # (t, x, y)
+        self.recent_revisit_radius_m: float = 0.6
+        self.recent_revisit_window_sec: float = 60.0
+
+        # Post-success cooldown to avoid reacting to BT noise
+        self._last_success_time: float = 0.0
+        self.post_success_cooldown_sec: float = 1.0
+
+        # Stuck check timer
         self.create_timer(0.2, self._check_stuck)
 
+        # ---------- Server readiness ----------
         self.get_logger().info(f"Mode: {self.params.mode}")
         self.get_logger().info('Waiting for Nav2 action servers...')
         self.nav_client.wait_for_server(); self.plan_client.wait_for_server()
@@ -112,13 +135,18 @@ class WaypointRecoveryCommander(Node):
 
         if self.params.mode == "explore":
             self.get_logger().info(f"Explorer arms in {self.params.initial_explore_delay_sec:.1f}s…")
-            self._start_explore_once = self.create_timer(self.params.initial_explore_delay_sec, self._start_explore_after_delay)
+            self._start_explore_once = self.create_timer(
+                self.params.initial_explore_delay_sec, self._start_explore_after_delay
+            )
         else:
             self._send_current_waypoint()
 
-    # helpers
+    # ---------- Small helpers ----------
     def _start_explore_after_delay(self):
-        self._start_explore_once.cancel()
+        try:
+            self._start_explore_once.cancel()
+        except Exception:
+            pass
         self.create_timer(self.params.explore_tick_sec, self._explore_tick)
         self.get_logger().info("Explorer active.")
 
@@ -149,13 +177,13 @@ class WaypointRecoveryCommander(Node):
             self._retry_timer.cancel()
             self._retry_timer = None
 
-    # send goals 
+    # ---------- Sending goals ----------
     def _same_goal(self, a: PoseStamped, b: PoseStamped, tol: float = 1e-3) -> bool:
         return (abs(a.pose.position.x - b.pose.position.x) < tol and
                 abs(a.pose.position.y - b.pose.position.y) < tol)
 
     def _send_nav_to(self, goal_pose: PoseStamped, *, reset_attempts: bool):
-        # prevent double-send of the same goal while one is already active
+        # prevent double-send of the same goal while active
         if self.goal_active and self.current_goal is not None and self._same_goal(self.current_goal, goal_pose):
             return
 
@@ -174,11 +202,50 @@ class WaypointRecoveryCommander(Node):
     def _send_current_waypoint(self):
         self._send_nav_to(self._stamp(self.waypoints[self.current_idx]), reset_attempts=True)
 
-    def _advance_waypoint(self):
-        self.current_idx = (self.current_idx + 1) % len(self.waypoints)
-        self._send_current_waypoint()
+    def _mark_waypoint_visited(self, idx: int):
+        if 0 <= idx < len(self._wp_last_visit_sec):
+            self._wp_last_visit_sec[idx] = self._now_sec()
 
-    # Nav2 callbacks 
+    def _advance_waypoint(self):
+        """
+        Anti-ping-pong:
+          - Dwell briefly on arrival.
+          - If ≥3 waypoints, skip the most recently visited ones for a while.
+        """
+        def _go_next(idx: int):
+            self.current_idx = idx
+            self._send_current_waypoint()
+
+        # dwell before advancing
+        if self.dwell_on_arrival_sec > 0.0:
+            def _after_dwell():
+                self._advance_waypoint_core(_go_next)
+            # schedule one-shot
+            self.create_timer(self.dwell_on_arrival_sec, _after_dwell)
+        else:
+            self._advance_waypoint_core(_go_next)
+
+    def _advance_waypoint_core(self, dispatch_fn):
+        n = len(self.waypoints)
+        if n <= 2:
+            next_idx = (self.current_idx + 1) % n
+            dispatch_fn(next_idx)
+            return
+
+        # Prefer the first waypoint not visited recently
+        start = (self.current_idx + 1) % n
+        best = start
+        now = self._now_sec()
+        for k in range(n):
+            i = (start + k) % n
+            last = self._wp_last_visit_sec[i] if i < len(self._wp_last_visit_sec) else 0.0
+            if now - last >= self.min_revisit_interval_sec:
+                best = i
+                break
+
+        dispatch_fn(best)
+
+    # ---------- Nav2 callbacks ----------
     def _on_nav_goal_sent(self, future):
         gh = future.result()
         if not gh.accepted:
@@ -198,36 +265,60 @@ class WaypointRecoveryCommander(Node):
             self.get_logger().info('Goal reached')
             self.recovering = False
             self.recovery_attempts = 0
+            self._last_success_time = self._now_sec()
+
             if self.params.mode == "explore" and self.current_goal is not None:
                 gx, gy = self.current_goal.pose.position.x, self.current_goal.pose.position.y
                 self.blacklist.append((gx, gy))
-            if self.params.mode == "explore": self._explore_tick()
-            else:                             self._advance_waypoint()
+                self._record_reached(gx, gy)
+
+            if self.params.mode == "explore":
+                self._explore_tick()
+            else:
+                # mark waypoint visit & move on
+                try:
+                    self._mark_waypoint_visited(self.current_idx)
+                except Exception:
+                    pass
+                self._advance_waypoint()
         else:
             self.get_logger().warn(f'NavigateToPose ended with status={status} → recovery')
             self._trigger_recovery(f'nav_status_{status}')
 
-    # BT and Odom
+    # ---------- BT & Odom ----------
     def bt_log_callback(self, msg: BehaviorTreeLog):
+        """
+        React only to a *fresh* NavigateRecovery RUNNING→FAILURE transition,
+        and only if we currently have a goal active (and not recovering).
+        Debounce also with a post-success cooldown to avoid noise.
+        """
         if not self.goal_active or self.recovering:
-            return 
-        
+            return
+        if (self._now_sec() - self._last_success_time) < self.post_success_cooldown_sec:
+            return
+
+        now = self._now_sec()
         for e in msg.event_log:
-            if not e.node_name.endswith('NavigateRecovery'):
+            try:
+                node_ok = e.node_name.endswith('NavigateRecovery')
+            except Exception:
+                node_ok = False
+            if not node_ok:
                 continue
 
             prev = getattr(e, 'previous_status', '')
             curr = getattr(e, 'current_status', '')
 
+            # event timestamp if available
             try:
                 et = e.timestamp.sec + e.timestamp.nanosec / 1e9
             except Exception:
                 et = now
 
-            if (curr == 'FAILURE' and prev == 'RUNNING' and (now - et) < 0.5):
+            if curr == 'FAILURE' and prev == 'RUNNING' and (now - et) < 0.5:
                 self.get_logger().info('BT NavigateRecovery transition RUNNING→FAILURE → trigger recovery')
                 self._trigger_recovery('bt_navrecov_failed')
-                return 
+                return
 
     def odom_callback(self, msg: Odometry):
         now = self._now_sec()
@@ -242,15 +333,17 @@ class WaypointRecoveryCommander(Node):
         for (t, x, y) in self._odom_buf:
             if now - t >= self.params.stuck_window_sec:
                 oldest = (t, x, y); break
-        if oldest is None: return
+        if oldest is None:
+            return
         _, x0, y0 = oldest; _, x1, y1 = self._odom_buf[-1]
         if math.hypot(x1 - x0, y1 - y0) < self.params.min_progress_m:
             self.get_logger().warn(f'No progress in {self.params.stuck_window_sec:.1f}s → recovery')
             self._trigger_recovery('stuck_no_progress')
 
-    # recovery
+    # ---------- Recovery ----------
     def _trigger_recovery(self, reason: str):
-        if self.recovering: return
+        if self.recovering:
+            return
         if self.recovery_attempts >= self.params.max_recovery_attempts_per_goal:
             self.get_logger().error('Max recoveries reached.')
             self.recovering = False
@@ -260,7 +353,7 @@ class WaypointRecoveryCommander(Node):
                 gx, gy = self.current_goal.pose.position.x, self.current_goal.pose.position.y
                 self.blacklist.append((gx, gy))
                 self.get_logger().warn(f'Blacklisting unreachable goal ({gx:.2f}, {gy:.2f}).')
-                self.current_goal = None  # important: drop it so we don't reuse
+                self.current_goal = None  # drop it so we don't reuse
                 self._explore_tick()
             else:
                 self._advance_waypoint()
@@ -294,16 +387,21 @@ class WaypointRecoveryCommander(Node):
         gh.get_result_async().add_done_callback(self._on_backup_done)
 
     def _on_backup_done(self, future):
-        if future.result().status == 4: self.get_logger().info('BackUp complete')
-        else:                            self.get_logger().warn(f'BackUp failed (status={future.result().status})')
+        if future.result().status == 4:
+            self.get_logger().info('BackUp complete')
+        else:
+            self.get_logger().warn(f'BackUp failed (status={future.result().status})')
+        # proceed no matter what
         self._do_spin()
 
     def _do_spin(self):
+        # throttle spins to avoid hammering controller
         if self._now_sec() - self._last_spin_end_time < self.params.min_seconds_between_spins:
             self.get_logger().warn("Skipping spin (throttled) → retry nav")
             self._finish_recovery(); return
+
         goal = Spin.Goal()
-        goal.target_yaw = self.params.spin_angle_rad
+        goal.target_yaw = self.params.spin_angle_rad     # π by default (sweep spin elsewhere stays 2π)
         goal.time_allowance = RosDuration(sec=self.params.action_time_allowance_sec)
         self.spin_client.send_goal_async(goal).add_done_callback(self._on_spin_sent)
 
@@ -315,8 +413,10 @@ class WaypointRecoveryCommander(Node):
         gh.get_result_async().add_done_callback(self._on_spin_done)
 
     def _on_spin_done(self, future):
-        if future.result().status == 4: self.get_logger().info('Spin complete (360°)')
-        else:                            self.get_logger().warn(f'Spin failed (status={future.result().status})')
+        if future.result().status == 4:
+            self.get_logger().info('Spin complete')
+        else:
+            self.get_logger().warn(f'Spin failed (status={future.result().status})')
         self._last_spin_end_time = self._now_sec()
         self._finish_recovery()
 
@@ -325,7 +425,6 @@ class WaypointRecoveryCommander(Node):
         self.get_logger().info('Retrying current goal after recovery…')
         self._cancel_retry_timer()
 
-        # one-shot retry timer (cancel itself before running)
         def _retry_once():
             if self._retry_timer:
                 self._retry_timer.cancel()
@@ -338,7 +437,7 @@ class WaypointRecoveryCommander(Node):
 
         self._retry_timer = self.create_timer(self.params.retry_delay_sec, _retry_once)
 
-    # exploration
+    # ---------- Exploration ----------
     def map_cb(self, msg: OccupancyGrid):
         self.latest_map = msg
 
@@ -362,11 +461,23 @@ class WaypointRecoveryCommander(Node):
     def _is_blacklisted(self, x: float, y: float) -> bool:
         return any(math.hypot(x - bx, y - by) < self.params.blacklist_radius_m for (bx, by) in self.blacklist)
 
+    def _record_reached(self, x: float, y: float):
+        self.recent_reached.append((self._now_sec(), x, y))
+
+    def _too_recent(self, x: float, y: float) -> bool:
+        now = self._now_sec()
+        for (t, rx, ry) in self.recent_reached:
+            if (now - t) <= self.recent_revisit_window_sec and math.hypot(x - rx, y - ry) < self.recent_revisit_radius_m:
+                return True
+        return False
+
     def _pick_frontier_goal(self) -> Optional[PoseStamped]:
         if self.latest_map is None:
             self.get_logger().info("Waiting for map...")
             return None
-        grid = self.latest_map.data; w = self.latest_map.info.width; h = self.latest_map.info.height
+        grid = self.latest_map.data
+        w = self.latest_map.info.width
+        h = self.latest_map.info.height
         res  = self.latest_map.info.resolution
         ox   = self.latest_map.info.origin.position.x
         oy   = self.latest_map.info.origin.position.y
@@ -388,12 +499,15 @@ class WaypointRecoveryCommander(Node):
             lgx, lgy = self.current_goal.pose.position.x, self.current_goal.pose.position.y
             for (xi, yi) in fr_ij:
                 wx, wy = world(xi, yi)
-                if not self._is_blacklisted(wx, wy) and math.hypot(wx - lgx, wy - lgy) >= self.params.min_frontier_separation_m:
+                if (not self._is_blacklisted(wx, wy) and
+                    not self._too_recent(wx, wy) and
+                    math.hypot(wx - lgx, wy - lgy) >= self.params.min_frontier_separation_m):
                     filt.append((xi, yi))
         else:
             for (xi, yi) in fr_ij:
                 wx, wy = world(xi, yi)
-                if not self._is_blacklisted(wx, wy):
+                if (not self._is_blacklisted(wx, wy) and
+                    not self._too_recent(wx, wy)):
                     filt.append((xi, yi))
         if not filt: return None
 
@@ -455,11 +569,20 @@ class WaypointRecoveryCommander(Node):
 
         if self.current_goal is not None:
             lgx, lgy = self.current_goal.pose.position.x, self.current_goal.pose.position.y
-            cand = [(xi,yi) for (xi,yi) in fr
-                    if not self._is_blacklisted(*world(xi,yi))
-                    and math.hypot(world(xi,yi)[0]-lgx, world(xi,yi)[1]-lgy) >= max(0.35, self.params.min_frontier_separation_m*0.75)]
+            cand = []
+            for (xi,yi) in fr:
+                wx, wy = world(xi,yi)
+                if (not self._is_blacklisted(wx, wy) and
+                    not self._too_recent(wx, wy) and
+                    math.hypot(wx-lgx, wy-lgy) >= max(0.35, self.params.min_frontier_separation_m*0.75)):
+                    cand.append((xi,yi))
         else:
-            cand = [(xi,yi) for (xi,yi) in fr if not self._is_blacklisted(*world(xi,yi))]
+            cand = []
+            for (xi,yi) in fr:
+                wx, wy = world(xi,yi)
+                if (not self._is_blacklisted(wx, wy) and
+                    not self._too_recent(wx, wy)):
+                    cand.append((xi,yi))
         if not cand: return None
 
         if self.current_goal is not None:
@@ -474,6 +597,7 @@ class WaypointRecoveryCommander(Node):
         return goal
 
     def _spin_sweep_then(self, cont_fn):
+        # full sweep spin (2π) with generous allowance
         if self._now_sec() - self._last_spin_end_time < self.params.min_seconds_between_spins:
             cont_fn(); return
         goal = Spin.Goal()
@@ -491,7 +615,7 @@ class WaypointRecoveryCommander(Node):
             gh.get_result_async().add_done_callback(_after_done)
         self.spin_client.send_goal_async(goal).add_done_callback(_after_sent)
 
-    # planner pre-check
+    # ---------- Planner pre-check ----------
     def _validate_goal_async(self, goal_pose: PoseStamped):
         if self.planning: return
         self.planning = True; self.pending_candidate = goal_pose
@@ -558,3 +682,19 @@ class WaypointRecoveryCommander(Node):
             px, py = self.pending_candidate.pose.position.x, self.pending_candidate.pose.position.y
             self.blacklist.append((px, py))
         self.pending_candidate = None
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = WaypointRecoveryCommander()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
