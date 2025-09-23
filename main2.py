@@ -1,12 +1,23 @@
 import rclpy
 from exploration import Exploration
+from recovery import Recovery   # <--- import Recovery
 
 def start_navigation(args):
     rclpy.init(args=args)
+
+    # Create the exploration node
     node = Exploration()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+
+    # Attach Recovery helper to the exploration node
+    node.recovery = Recovery(node)
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.get_logger().info("Navigation stopped by user.")
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 def main(args=None):
     start_navigation(args)
