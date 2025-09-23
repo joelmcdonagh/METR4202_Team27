@@ -1,14 +1,12 @@
 import rclpy
 from exploration import Exploration
-from recovery import Recovery   # <--- import Recovery
+from recovery import Recovery   
 
 def start_navigation(args):
     rclpy.init(args=args)
 
-    # Create the exploration node
     node = Exploration()
-
-    # Attach Recovery helper to the exploration node
+    
     node.recovery = Recovery(node)
 
     try:
