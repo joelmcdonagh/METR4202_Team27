@@ -1,16 +1,17 @@
 import rclpy
-from exploration import Exploration
-from recovery import Recovery   
+from .exploration import Exploration
+from rclpy.executors import MultiThreadedExecutor
 
 def start_navigation(args):
     rclpy.init(args=args)
 
     node = Exploration()
-    
-    node.recovery = Recovery(node)
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
 
     try:
         rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         node.get_logger().info("Navigation stopped by user.")
     finally:
@@ -19,6 +20,3 @@ def start_navigation(args):
 
 def main(args=None):
     start_navigation(args)
-
-if __name__ == '__main__':
-    main()

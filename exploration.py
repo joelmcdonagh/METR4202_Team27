@@ -5,16 +5,27 @@ from nav_msgs.msg import OccupancyGrid
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
+from nav_msgs.msg import Odometry
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 import numpy as np
+from .recovery import Recovery
 
 class Exploration(Node):
 
     def __init__(self):
         # Subscribe to occupancy grid
         super().__init__('map_listener')
-        self.subscription = self.create_subscription(OccupancyGrid, '/map', self.map_callback, 5)
-        self.create_subscription(PoseStamped, '/slam_toolbox/pose', self.pose_callback, 5)
+        self.subscription = self.create_subscription(OccupancyGrid, '/map', self.map_callback, 10)
+        
+        # Subscribe to odometry
+        self.create_subscription(
+            Odometry,
+            '/odom',
+            self.odom_callback,
+            10
+        )
+
         self.occupancy_grid = None
         self.map_info = None
         self.frontier_cells = []
@@ -28,18 +39,19 @@ class Exploration(Node):
         # Wait for server if ros2 isnt open
         self.nav_client.wait_for_server()
 
-        # Timer to force goal reselect every 10 seconds regardless
-        self.timer = self.create_timer(10.0, self.timer_callback)
+        # Instantiate recovery class
+        self.recovery = Recovery(self)
 
     def round_coords(self, coord, decimals=2):
         return (round(coord[0], decimals), round(coord[1], decimals))
 
-    def pose_callback(self, msg):
+    def odom_callback(self, msg):
         # Update robot position
-        self.robot_pos = (msg.pose.position.x, msg.pose.position.y)
+        self.robot_pos = (msg.pose.pose.position.x, msg.pose.pose.position.y)
 
         # If no current goal, try to pick one
         if self.current_goal is None and self.frontier_cells:
+            self.get_logger().info(f"Choosing frontier")
             chosen_frontier = self.pick_frontier(self.frontier_cells, self.robot_pos)
             if chosen_frontier:
                 self.get_logger().info(f"Chosen frontier is {chosen_frontier}")
@@ -57,6 +69,7 @@ class Exploration(Node):
 
         # Otherwise, track the current goal
         elif self.current_goal is not None:
+            # Check distance to goal
             dist = np.hypot(self.robot_pos[0]-self.current_goal[0], self.robot_pos[1]-self.current_goal[1])
             if dist < 0.4:  # 40cm tolerance from goal
                 # If goal reached, set current_goal to None so another will be found
@@ -76,11 +89,11 @@ class Exploration(Node):
         self.frontier_cells = self.find_frontiers()
         self.get_logger().info(f"Found {len(self.frontier_cells)} frontier cells")
 
-    def timer_callback(self):
-        # Force a new goal every 10 seconds regardless
-        if self.current_goal is not None:
-            self.get_logger().info("Forcing new goal after timeout")
-            self.current_goal = None
+    #def timer_callback(self):
+    #    # Force a new goal every 10 seconds regardless
+    #    if self.current_goal is not None:
+    #        self.get_logger().info("Forcing new goal after timeout")
+    #        self.current_goal = None
 
     def find_frontiers(self):
         if self.occupancy_grid is None:
@@ -114,11 +127,14 @@ class Exploration(Node):
             y = self.map_info.origin.position.y + (h + 0.5) * grid_res
             return (x, y)
         
-        # Filter out visited frontiers
-        unvisited = [f for f in frontiers if self.round_coords(get_world_coords(*f)) not in self.visited_frontiers]
+        # Filter out visited frontiers and blacklisted cells
+        unvisited = [f for f in frontiers
+                    if self.round_coords(get_world_coords(*f)) not in self.visited_frontiers
+                    and self.round_coords(get_world_coords(*f)) not in self.recovery.blacklist]
         if not unvisited:
-            self.get_logger().info("Every frontier has been visited")
+            self.get_logger().info("Every frontier has been visited or is blacklisted")
             return None
+
 
         # Currently just find closest frontier --- CHANGE
         closest = min(unvisited, key=lambda f: np.hypot(get_world_coords(*f)[0]-robot_position[0],
@@ -143,7 +159,37 @@ class Exploration(Node):
         goal.pose = pose
 
         self.get_logger().info(f"Sending Nav2 goal: ({x:.2f}, {y:.2f})")
-        self.nav_client.send_goal_async(goal).add_done_callback(self.goal_receive_callback)
+
+        send_future = self.nav_client.send_goal_async(goal)
+        send_future.add_done_callback(self.goal_response_callback)
+
+    def goal_response_callback(self, future):
+        goal = future.result()
+        if not goal.accepted:
+            self.get_logger().warn("Goal rejected")
+            self.current_goal = None
+            return
+
+        self.get_logger().info("Goal accepted, waiting for result")
+        result_future = goal.get_result_async()
+        result_future.add_done_callback(self.goal_result_callback)
+
+    def goal_result_callback(self, future):
+        status = future.result().status
+
+        # Check goal result and report back to user
+        if status == 4:  # Goal was aborted
+            self.get_logger().warn("Goal aborted, triggering recovery")
+            self.recovery.recover(self.current_goal)
+            self.current_goal = None
+        elif status == 5:  # Goal was canceled
+            self.get_logger().warn("Goal canceled")
+            self.current_goal = None
+        else: # Goal was successful
+            self.get_logger().info("Goal succeeded")
+            self.current_goal = None
+
+        
     
 
     
