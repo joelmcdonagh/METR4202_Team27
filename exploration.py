@@ -9,6 +9,7 @@ from nav_msgs.msg import Odometry
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 import numpy as np
+import time
 from .recovery import Recovery
 
 class Exploration(Node):
@@ -25,6 +26,10 @@ class Exploration(Node):
             self.odom_callback,
             10
         )
+
+        # Initialise the goal_time and frontier_update time counter to slow updates
+        self.goal_time = 0.0
+        self.frontier_update_time = 0.0
 
         self.occupancy_grid = None
         self.map_info = None
@@ -49,33 +54,56 @@ class Exploration(Node):
         # Update robot position
         self.robot_pos = (msg.pose.pose.position.x, msg.pose.pose.position.y)
 
-        # If no current goal, try to pick one
-        if self.current_goal is None and self.frontier_cells:
-            self.get_logger().info(f"Choosing frontier")
-            chosen_frontier = self.pick_frontier(self.frontier_cells, self.robot_pos)
-            if chosen_frontier:
-                self.get_logger().info(f"Chosen frontier is {chosen_frontier}")
-                self.current_goal = chosen_frontier
+        # Get current time for goal timer
+        current_time = time.time()
 
-                # Shorten oldest frontier in visited frontiers list so it doesn't grow too high
-                if len(self.visited_frontiers) > 100:
-                    self.visited_frontiers.pop(0)
-                
-                # Add to visited list
-                self.visited_frontiers.append(self.round_coords(chosen_frontier))
+        # If there is already a goal in progress, track current goal
+        if self.current_goal is not None:
 
-                # Send goal to NAV2
-                self.send_goal(*chosen_frontier)
-
-        # Otherwise, track the current goal
-        elif self.current_goal is not None:
-            # Check distance to goal
+            # First check if the goal has been reached
             dist = np.hypot(self.robot_pos[0]-self.current_goal[0], self.robot_pos[1]-self.current_goal[1])
             if dist < 0.4:  # 40cm tolerance from goal
                 # If goal reached, set current_goal to None so another will be found
                 self.get_logger().info("Goal reached!")
                 self.current_goal = None
+                self.goal_time = 0.0
+                return
+            
+            # Return if goal time limit (30 seconds) has not been reached yet
+            if current_time - self.goal_time < 30.0:
+                return
+            
+            # If goal timer expired, reset
+            self.get_logger().info("Goal timed out - Starting new goal")
+            self.current_goal = None
+            self.goal_time = 0.0
 
+        # If the frontier list is empty and there is no current goal, find and send a new goal
+        if self.current_goal is None and self.frontier_cells:
+
+            # Cluster frontiers
+            frontier_clusters = self.cluster_frontiers(self.frontier_cells, 4)
+            self.get_logger().info(f"Generated {len(frontier_clusters)} clusters")
+
+            # Choose frontier cluster
+            chosen_frontier = self.pick_frontier_cluster(frontier_clusters, self.robot_pos)
+
+            if chosen_frontier:
+                # Frontier has been chosen
+                self.get_logger().info(f"Chosen cluster is {chosen_frontier}")
+                self.current_goal = chosen_frontier
+                self.goal_time = current_time
+
+                # Shorten oldest frontier in visited frontiers list so it doesn't grow too high
+                if len(self.visited_frontiers) > 100:
+                    self.visited_frontiers.pop(0)
+                
+                # Add to visited list, but keep the list small
+                self.visited_frontiers.append(self.round_coords(chosen_frontier))
+
+                # Send goal to NAV2
+                self.send_goal(*chosen_frontier)
+    
     def map_callback(self, msg: OccupancyGrid):
         # Convert data array from SLAM into numpy 2D array
         new_grid = np.array(msg.data, dtype=np.int8).reshape((msg.info.height, msg.info.width))
@@ -83,17 +111,19 @@ class Exploration(Node):
         # Update occupancy grid
         self.occupancy_grid = new_grid
         self.map_info = msg.info
+
+        # Timer to limit finding frontiers to every 3 seconds
+        current_time = time.time()
+        if current_time - self.frontier_update_time < 5.0:
+            return  # Return if timer hasnt been reached
+        
+        # If timer reached, update map
+        self.frontier_update_time = current_time
         self.get_logger().info("Map Updated")
 
         # Move onto detecting cells with unkown neighbours
         self.frontier_cells = self.find_frontiers()
         self.get_logger().info(f"Found {len(self.frontier_cells)} frontier cells")
-
-    #def timer_callback(self):
-    #    # Force a new goal every 10 seconds regardless
-    #    if self.current_goal is not None:
-    #        self.get_logger().info("Forcing new goal after timeout")
-    #        self.current_goal = None
 
     def find_frontiers(self):
         if self.occupancy_grid is None:
@@ -115,8 +145,63 @@ class Exploration(Node):
                     frontiers.append((h, w))
         return frontiers
 
-    def pick_frontier(self, frontiers: list, robot_position: tuple):
-        if not frontiers:
+    def cluster_frontiers(self, frontiers: list, distance_threshold):
+
+        # Helper function to get a neighbours list of given cell
+        def get_neighbours_of_cell(cell):
+            height, width = cell
+            neighbours = []
+            neighbours.append((height - 1, width)) # Append neighbour above cell
+            neighbours.append((height + 1, width)) # Append neighbour below cell
+            neighbours.append((height, width - 1)) # Append neighbour to left of cell
+            neighbours.append((height, width + 1)) # Append neighbour to right of cell
+
+            # Diagonals
+            neighbours.append((height - 1, width - 1))
+            neighbours.append((height - 1, width + 1))
+            neighbours.append((height + 1, width - 1))
+            neighbours.append((height + 1, width + 1))
+
+            return neighbours
+        
+        clusters = []
+        visited_frontiers = set()
+
+        # Loop through all frontiers in given list
+        for frontier in frontiers:
+            # Ignore frontier if it has been visited
+            if frontier in visited_frontiers:
+                continue
+
+            current_cluster = []
+            queue = [frontier]
+            visited_frontiers.add(frontier)
+
+            # Use Breadth-first-search to cluster frontiers
+            while queue:
+                current_frontier = queue.pop(0)
+                current_cluster.append(current_frontier)
+
+                # Check for neighbours around this cell which are also frontier cells
+                for neighbour in get_neighbours_of_cell(current_frontier):
+                    if neighbour in frontiers and neighbour not in visited_frontiers:
+                        # Add it to the cluster if distance is less than threshold (radius of clustering)
+                        if abs(neighbour[0] - current_frontier[0]) <= distance_threshold and abs(neighbour[1] - current_frontier[1]) <= distance_threshold:
+                            visited_frontiers.add(neighbour)
+                            queue.append(neighbour)
+
+            # Add current cluster to list
+            if current_cluster:
+                clusters.append(current_cluster)
+
+        return clusters
+
+
+        
+
+
+    def pick_frontier_cluster(self, frontier_clusters: list, robot_position: tuple):
+        if not frontier_clusters:
             return None
     
         grid_res = self.map_info.resolution
@@ -126,28 +211,54 @@ class Exploration(Node):
             x = self.map_info.origin.position.x + (w + 0.5) * grid_res
             y = self.map_info.origin.position.y + (h + 0.5) * grid_res
             return (x, y)
+
+        # Make centroids
+        centroids = []
+        for cluster in frontier_clusters:
+            average_height_cluster = sum(c[0] for c in cluster) / len(cluster)
+            average_width_cluster = sum(c[1] for c in cluster) / len(cluster)
+            centroids.append(get_world_coords(average_height_cluster, average_width_cluster))
         
-        # Filter out visited frontiers and blacklisted cells
-        unvisited = [f for f in frontiers
-                    if self.round_coords(get_world_coords(*f)) not in self.visited_frontiers
-                    and self.round_coords(get_world_coords(*f)) not in self.recovery.blacklist]
+        # Filter out visited and blacklisted clusters
+        unvisited = [c for c in centroids
+                    if self.round_coords(c) not in self.visited_frontiers
+                    and self.round_coords(c) not in self.recovery.blacklist]
         if not unvisited:
             self.get_logger().info("Every frontier has been visited or is blacklisted")
             return None
+        
+        # Function for getting distance to nearest wall
+        def wall_distance(world_point):
+            grid = self.occupancy_grid
+            height, width = grid.shape
+            x, y = world_point
 
+            # convert back to grid coords
+            grid_X = int((x - self.map_info.origin.position.x) / grid_res)
+            grid_Y = int((y - self.map_info.origin.position.y) / grid_res)
 
-        # Currently just find closest frontier --- CHANGE
-        closest = min(unvisited, key=lambda f: np.hypot(get_world_coords(*f)[0]-robot_position[0],
-                                                     get_world_coords(*f)[1]-robot_position[1]))
-        return get_world_coords(*closest)
+            min_dist = float("inf")
+            for h in range(max(0, grid_Y-10), min(height, grid_Y+10)):
+                for w in range(max(0, grid_X-10), min(width, grid_X+10)):
+                    if grid[h, w] == 100:  # wall cell
+                        dist = np.hypot(h-grid_Y, w-grid_X) * grid_res
+                        if dist < min_dist:
+                            min_dist = dist
+            return min_dist
 
-    def goal_receive_callback(self, future):
-        goal_h = future.result()
-        if not goal_h.accepted:
-            self.get_logger().info("Goal rejected")
-            self.current_goal = None
-            return
-        self.get_logger().info("Goal accepted")
+        # Use the best centroid by finding score
+        def get_cluster_score(centroid_pos):
+            # Use distance to formula to find distance between cluster centroid and robot
+            distance_to_robot = np.hypot(centroid_pos[0]-robot_position[0], centroid_pos[1]-robot_position[1])
+            # Use wall distance helper function to find distance from centroid to wall
+            #distance_to_wall = wall_distance(centroid_pos)
+
+            # Return score
+            return distance_to_robot
+
+        # Choose the best centroid which has not been explored yet using score function
+        best_goal = min(unvisited, key=get_cluster_score)
+        return best_goal
 
     def send_goal(self, x, y):
         goal = NavigateToPose.Goal()
@@ -187,7 +298,6 @@ class Exploration(Node):
             self.current_goal = None
         else: # Goal was successful
             self.get_logger().info("Goal succeeded")
-            self.current_goal = None
 
         
     
