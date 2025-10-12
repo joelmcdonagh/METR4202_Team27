@@ -1,0 +1,14 @@
+material Custom/Marker
+{
+  technique
+  {
+    pass
+    {
+      lighting off
+      texture_unit
+      {
+        texture 6x6_1.png
+      }
+    }
+  }
+}
