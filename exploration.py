@@ -27,10 +27,11 @@ class Exploration(Node):
             10
         )
 
+        self.distance_threshold = 2
+
         # Initialise the goal_time and frontier_update time counter to slow updates
         self.goal_time = 0.0
         self.frontier_update_time = 0.0
-
         self.occupancy_grid = None
         self.map_info = None
         self.frontier_cells = []
@@ -82,11 +83,17 @@ class Exploration(Node):
         if self.current_goal is None and self.frontier_cells:
 
             # Cluster frontiers
-            frontier_clusters = self.cluster_frontiers(self.frontier_cells, 4)
-            self.get_logger().info(f"Generated {len(frontier_clusters)} clusters")
-
-            # Choose frontier cluster
-            chosen_frontier = self.pick_frontier_cluster(frontier_clusters, self.robot_pos)
+            frontier_clusters = self.cluster_frontiers(self.frontier_cells, self.distance_threshold)
+            # If there are not enough clusters, go to the nearest frontier cell instead
+            if len(frontier_clusters) <= 1:
+                self.get_logger().info("Not enough clusters — switching to single frontier mode")
+                # Put frontiers in clusters of 1 so pick_frontier_cluster can be used
+                single_frontier_clusters = [[f] for f in self.frontier_cells]
+                chosen_frontier = self.pick_frontier_cluster(single_frontier_clusters, self.robot_pos)
+            else:
+                self.get_logger().info(f"Generated {len(frontier_clusters)} clusters")
+                # Choose frontier cluster
+                chosen_frontier = self.pick_frontier_cluster(frontier_clusters, self.robot_pos)
 
             if chosen_frontier:
                 # Frontier has been chosen
