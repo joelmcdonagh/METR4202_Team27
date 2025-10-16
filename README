@@ -19,13 +19,13 @@ METR4202 PROJECT INTERIM
 3. VS -> Place Files in directories - / Create directories
 
 
-	WorldThird.world -> turtlebot3_ws\install\turtlebot3_gazebo\share\turtlebot3_gazebo\worlds
-	turtlebot3_world_third.launch.py -> turtlebot3_ws\install\turtlebot3_gazebo\share\turtlebot3_gazebo\launch
+	(Existing Directory) WorldThird.world -> turtlebot3_ws\install\turtlebot3_gazebo\share\turtlebot3_gazebo\worlds
+	(Existing Directory) turtlebot3_world_third.launch.py -> turtlebot3_ws\install\turtlebot3_gazebo\share\turtlebot3_gazebo\launch
 
-        Create Directory 
+    Create Directory:  
+	turtlebot3_ws\install\turtlebot3_gazebo\share\turtlebot3_gazebo\worlds\media\materials\scripts
 
-  turtlebot3_ws\install\turtlebot3_gazebo\share\turtlebot3_gazebo\worlds\media\materials\scripts
-	my_texture.material -> turtlebot3_ws\install\turtlebot3_gazebo\share\turtlebot3_gazebo\worlds\media\materials\scripts
+ 	my_texture.material -> turtlebot3_ws\install\turtlebot3_gazebo\share\turtlebot3_gazebo\worlds\media\materials\scripts
 
 
 4. PNG graphic
@@ -33,11 +33,12 @@ METR4202 PROJECT INTERIM
   Download 6x6_1.png from Github repository
 
   Create Directory - VS
+
   /turtlebot3_ws/install/turtlebot3_simulations/turtlebot3_gazebo/worlds/media/materials/textures/
 
   Open Ubuntu Command Line
 
-	mv /mnt/c/Users/..../Downloads/6x6_1.png ~/turtlebot3_ws/install/turtlebot3_simulations/turtlebot3_gazebo/worlds/media/materials/textures/
+  mv /mnt/c/Users/..../Downloads/6x6_1.png ~/turtlebot3_ws/install/turtlebot3_simulations/turtlebot3_gazebo/worlds/media/materials/textures/
 
 
 5. Launch Turtlebot3 in New World
@@ -56,4 +57,52 @@ METR4202 PROJECT INTERIM
 	source ~/metr4202_ws/install/setup.bash
 	export TURTLEBOT3_MODEL=waffle
 	ros2 launch turtlebot3_navigation2 navigation2.launch.py use_sim_time:=True slam:=True
+
+
+
+## Running explorlation
+
+1. Open git hub https://github.com/joelmcdonagh/METR4202_Team27
+
+2. Copy Files:
+	exploration.py
+	main2.py
+
+3. VS -> Place file in directory
+
+	exploration.py -> metr4202_ws\waypoint_commander\waypoint_commander
+	main2.py -> metr4202_ws\waypoint_commander\waypoint_commander
+
+4. VS -> Alter setup.py to include the following
+
+	entry_points={
+        'console_scripts': [
+            'exploration = waypoint_commander.main2:main',
+        ],
+    },
+
+5. Run Recovery/waypoint detection
+
+	Open Ubuntu Command Line
+
+	cd ~/metr4202_ws
+	colcon build --packages-select waypoint_commander --symlink-install
+	source install/setup.bash
+	ros2 run waypoint_commander exploration
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
