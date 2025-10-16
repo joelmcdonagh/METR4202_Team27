@@ -91,7 +91,35 @@ METR4202 PROJECT INTERIM
 	ros2 run waypoint_commander exploration
 
 
+## Running recovery/waypoint detection
 
+1. Open git hub https://github.com/joelmcdonagh/METR4202_Team27
+
+2. Copy Files:
+	exploration.py
+	main2.py
+
+3. VS -> Place file in directory
+
+	exploration.py -> metr4202_ws\waypoint_commander\waypoint_commander
+	main2.py -> metr4202_ws\waypoint_commander\waypoint_commander
+
+4. VS -> Alter setup.py to include the following
+
+	entry_points={
+        'console_scripts': [
+            'exploration = waypoint_commander.main2:main',
+        ],
+    },
+
+5. Run Recovery/waypoint detection
+
+	Open Ubuntu Command Line
+
+	cd ~/metr4202_ws
+	colcon build --packages-select waypoint_commander --symlink-install
+	source install/setup.bash
+	ros2 run waypoint_commander exploration
 
 
 
