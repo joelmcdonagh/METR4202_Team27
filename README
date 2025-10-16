@@ -1,0 +1,59 @@
+README
+
+---------------------
+METR4202 PROJECT INTERIM
+---------------------
+
+## Opening Turtlebot3 in New World
+
+1. Open git hub https://github.com/joelmcdonagh/METR4202_Team27
+
+2. Copy Files:
+
+	WorldThird.world
+	Turtlebot3_world_third.launch.py
+
+	For ArUco Graphic: my_texture.material
+	For ArUco Graphic: 6x6_1.png
+
+3. VS -> Place Files in directories - / Create directories
+
+
+	WorldThird.world -> turtlebot3_ws\install\turtlebot3_gazebo\share\turtlebot3_gazebo\worlds
+	turtlebot3_world_third.launch.py -> turtlebot3_ws\install\turtlebot3_gazebo\share\turtlebot3_gazebo\launch
+
+        Create Directory 
+
+  turtlebot3_ws\install\turtlebot3_gazebo\share\turtlebot3_gazebo\worlds\media\materials\scripts
+	my_texture.material -> turtlebot3_ws\install\turtlebot3_gazebo\share\turtlebot3_gazebo\worlds\media\materials\scripts
+
+
+4. PNG graphic
+
+  Download 6x6_1.png from Github repository
+
+  Create Directory - VS
+  /turtlebot3_ws/install/turtlebot3_simulations/turtlebot3_gazebo/worlds/media/materials/textures/
+
+  Open Ubuntu Command Line
+
+	mv /mnt/c/Users/..../Downloads/6x6_1.png ~/turtlebot3_ws/install/turtlebot3_simulations/turtlebot3_gazebo/worlds/media/materials/textures/
+
+
+5. Launch Turtlebot3 in New World
+
+	Open Ubuntu Command Line
+
+	source ~/turtlebot3_ws/install/setup.bash
+	export TURTLEBOT3_MODEL=waffle
+	ros2 launch turtlebot3_gazebo turtlebot3_world_third.launch.py
+
+
+## Running SLAM/RVIZ
+
+1. Open Ubuntu Command Line
+	
+	source ~/metr4202_ws/install/setup.bash
+	export TURTLEBOT3_MODEL=waffle
+	ros2 launch turtlebot3_navigation2 navigation2.launch.py use_sim_time:=True slam:=True
+
