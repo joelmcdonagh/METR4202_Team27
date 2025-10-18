@@ -1,22 +1,12 @@
 import rclpy
-from .exploration import Exploration
-from rclpy.executors import MultiThreadedExecutor
-
-def start_navigation(args):
-    rclpy.init(args=args)
-
-    node = Exploration()
-    executor = MultiThreadedExecutor()
-    executor.add_node(node)
-
-    try:
-        rclpy.spin(node)
-        executor.spin()
-    except KeyboardInterrupt:
-        node.get_logger().info("Navigation stopped by user.")
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
-
-def main(args=None):
-    start_navigation(args)
+from rclpy.node import Node
+class ExplorationNode(Node):
+    def __init__(self):
+        super().__init__('exploration_node')
+        self.get_logger().info('Exploration node started')
+def main():
+    rclpy.init()
+    node = ExplorationNode()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()

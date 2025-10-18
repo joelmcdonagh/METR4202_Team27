@@ -1,0 +1,41 @@
+# ROS2 / Colcon Workspace
+build/
+install/
+log/
+.colcon_ignore
+
+# Python Cache
+pycache/
+*.pyc
+*.pyo
+*.pyd
+
+# Project Folders to Ignore
+World/
+Old/
+arCuo_scanning/
+
+# Launch & World Files
+*.launch.pyc
+*.world.old
+*.db3
+
+# VS Code / IDE Config
+.vscode/
+.idea/
+*.code-workspace
+
+# System Files
+.DS_Store
+Thumbs.db
+
+# Temporary / Backup Files
+*~
+*.swp
+
+# Simulation Outputs / Data
+*.bag
+*.csv
+*.log
+*.tmp
+*.bak
